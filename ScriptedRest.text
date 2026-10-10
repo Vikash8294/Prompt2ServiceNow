@@ -1,0 +1,840 @@
+// (function process(/*RESTAPIRequest*/ request, /*RESTAPIResponse*/ response) {
+
+//     // -----------------------------------------------------------------
+//     // STEP 1: Read what was sent to us
+//     // -----------------------------------------------------------------
+//     var body = request.body.data;
+
+//     gs.log("AI Studio received: " + JSON.stringify(body));
+
+//     // -----------------------------------------------------------------
+//     // STEP 2: Basic safety check
+//     // -----------------------------------------------------------------
+//     // We expect: { "tasks": [ {...}, {...} ] }
+//     if (!body || !body.tasks) {
+//         response.setStatus(400);
+//         response.setBody({
+//             status: "error",
+//             message: "Request must include a 'tasks' array"
+//         });
+//         return;
+//     }
+
+//     var results = [];
+
+//     // -----------------------------------------------------------------
+//     // STEP 3: Go through each task, one at a time
+//     // -----------------------------------------------------------------
+//     // NOTE: there is no try/catch here. That means if one task fails,
+//     // ServiceNow will show an error and stop — the tasks after it will
+//     // NOT run. This keeps the code simple to read and debug while
+//     // you're learning. Once you're comfortable, you can wrap the body
+//     // of this loop in try { ... } catch(e) { ... } so one bad task
+//     // doesn't stop the rest.
+//     for (var i = 0; i < body.tasks.length; i++) {
+
+//         var task = body.tasks[i];
+//         var newSysId = null;
+
+//         if (task.type === "record") {
+//             newSysId = createRecord(task);
+
+//         } else if (task.type === "business_rule") {
+//             newSysId = createBusinessRule(task);
+
+//         } else if (task.type === "client_script") {
+//             newSysId = createClientScript(task);
+
+//         } else if (task.type === "ui_policy") {
+//             newSysId = createUIPolicy(task);
+
+//         } else if (task.type === "script_include") {
+//             newSysId = createScriptInclude(task);
+
+//         } else if (task.type === "ui_action") {
+//             newSysId = createUIAction(task);
+
+//         } else if (task.type === "catalog_item") {
+//             newSysId = createCatalogItem(task);
+
+//         } else if (task.type === "notification") {
+//             newSysId = createNotification(task);
+
+//         } else if (task.type === "acl") {
+//             newSysId = createACL(task);
+
+//         } else if (task.type === "table") {
+//             newSysId = createTable(task);
+
+//         } else if (task.type === "field") {
+//             newSysId = createField(task);
+
+//         } else {
+//             // Unknown type — record it and move to the next task
+//             results.push({
+//                 status: "error",
+//                 type: task.type,
+//                 message: "Unsupported type: " + task.type
+//             });
+//             continue; // skip to the next task in the loop
+//         }
+
+//         results.push({
+//             status: "success",
+//             type: task.type,
+//             name: task.name || "",
+//             sys_id: newSysId
+//         });
+//     }
+
+//     // -----------------------------------------------------------------
+//     // STEP 4: Send back what happened for every task
+//     // -----------------------------------------------------------------
+//     response.setStatus(200);
+//     response.setBody({
+//         status: "done",
+//         results: results
+//     });
+
+
+//     // ===================================================================
+//     // Creator functions — one per type. Each takes the task object and
+//     // returns the sys_id of whatever record it created.
+//     // ===================================================================
+
+
+//     // Create a plain record in a table (e.g. a new Incident)
+//     function createRecord(task) {
+
+//         // Any table the user names in the prompt is allowed EXCEPT
+//         // these — these are ServiceNow system/security tables where
+//         // AI-generated writes could seriously damage the instance
+//         // (e.g. creating fake users, changing roles, altering
+//         // security rules, or modifying other scripts). Everything
+//         // else is open, since you're naming the table yourself.
+//         var blockedTables = [
+//             "sys_user",
+//             "sys_user_role",
+//             "sys_user_has_role",
+//             "sys_security_acl",
+//             "sys_script",
+//             "sys_script_client",
+//             "sys_script_include",
+//             "sys_dictionary",
+//             "sys_db_object",
+//             "sys_properties"
+//         ];
+
+//         if (blockedTables.indexOf(task.table) !== -1) {
+//             gs.error("Blocked: table '" + task.table + "' is a protected system table and cannot be written to through this endpoint");
+//             return null;
+//         }
+
+//         var fields = task.fields || {};
+//         var gr = new GlideRecord(task.table);
+//         gr.initialize();
+
+//         for (var fieldName in fields) {
+//             gr.setValue(fieldName, fields[fieldName]);
+//         }
+
+//         return gr.insert();
+//     }
+
+
+//     // Create a Business Rule
+//     function createBusinessRule(task) {
+//         var p = task.properties || {};
+
+//         var br = new GlideRecord("sys_script");
+//         br.initialize();
+
+//         br.name = task.name;
+//         br.collection = task.table;
+//         br.when = p.when;
+//         br.order = p.order || 100;
+
+//         br.action_insert = !!p.insert;
+//         br.action_update = !!p.update;
+//         br.action_delete = !!p["delete"];
+//         br.action_query = !!p.query;
+
+//         br.active = (p.active !== false);
+//         br.advanced = !!p.advanced;
+//         br.abort_action = !!p.abort_action;
+
+//         br.condition = p.condition || "";
+//         br.script = p.script || "";
+//         br.description = p.description || "";
+
+//         return br.insert();
+//     }
+
+
+//     // Create a Client Script
+//     function createClientScript(task) {
+//         var p = task.properties || {};
+
+//         var cs = new GlideRecord("sys_script_client");
+//         cs.initialize();
+
+//         cs.name = task.name;
+//         cs.table = task.table;
+//         cs.type = p.client_type;
+//         cs.field = p.field || "";
+//         cs.script = p.script || "";
+//         cs.active = true;
+
+//         return cs.insert();
+//     }
+
+
+//     // Create a UI Policy, plus one UI Policy Action per affected field
+//     function createUIPolicy(task) {
+//         var p = task.properties || {};
+
+//         var up = new GlideRecord("sys_ui_policy");
+//         up.initialize();
+
+//         up.short_description = task.name;
+//         up.table = task.table;
+//         up.conditions = p.condition || "";
+//         up.active = true;
+
+//         var uiPolicySysId = up.insert();
+
+//         addPolicyActionsForFields(uiPolicySysId, p.mandatory_fields, "mandatory");
+//         addPolicyActionsForFields(uiPolicySysId, p.read_only_fields, "read_only");
+//         addPolicyActionsForFields(uiPolicySysId, p.visible_fields, "visible");
+
+//         return uiPolicySysId;
+//     }
+
+//     // Helper used only by createUIPolicy above
+//     function addPolicyActionsForFields(uiPolicySysId, fieldList, kind) {
+//         if (!fieldList) return;
+
+//         for (var i = 0; i < fieldList.length; i++) {
+//             var action = new GlideRecord("sys_ui_policy_action");
+//             action.initialize();
+//             action.ui_policy = uiPolicySysId;
+//             action.field = fieldList[i];
+
+//             if (kind === "mandatory") action.mandatory = "true";
+//             if (kind === "read_only") action.disabled = "true";
+//             if (kind === "visible") action.visible = "true";
+
+//             action.insert();
+//         }
+//     }
+
+
+//     // Create a Script Include
+//     function createScriptInclude(task) {
+//         var p = task.properties || {};
+
+//         var si = new GlideRecord("sys_script_include");
+//         si.initialize();
+
+//         si.name = task.name;
+//         si.api_name = p.api_name || task.name;
+//         si.script = p.script || "";
+//         si.client_callable = !!p.client_callable;
+//         si.active = true;
+
+//         return si.insert();
+//     }
+
+
+//     // Create a UI Action (a button on a form or list)
+//     function createUIAction(task) {
+//         var p = task.properties || {};
+
+//         var ua = new GlideRecord("sys_ui_action");
+//         ua.initialize();
+
+//         ua.name = p.action_name || task.name;
+//         ua.table = task.table || "";
+//         ua.script = p.script || "";
+//         ua.form_button = !!p.form_button;
+//         ua.list_banner_button = !!p.list_banner_button;
+//         ua.condition = p.condition || "";
+//         ua.active = true;
+
+//         return ua.insert();
+//     }
+
+
+//     // Create a basic Catalog Item
+//     // (does not add variables or attach a workflow/flow — those are
+//     // separate records you can add later once this part is comfortable)
+//     function createCatalogItem(task) {
+//         var p = task.properties || {};
+
+//         var ci = new GlideRecord("sc_cat_item");
+//         ci.initialize();
+
+//         ci.name = task.name;
+//         ci.short_description = p.short_description || task.name;
+//         ci.price = p.price || "0";
+//         ci.active = true;
+
+//         if (p.category) {
+//             var cat = new GlideRecord("sc_category");
+//             cat.addQuery("title", p.category);
+//             cat.query();
+//             if (cat.next()) {
+//                 ci.category = cat.getUniqueValue();
+//             }
+//         }
+
+//         return ci.insert();
+//     }
+
+
+//     // Create an Email Notification
+//     function createNotification(task) {
+//         var p = task.properties || {};
+
+//         var n = new GlideRecord("sysevent_email_action");
+//         n.initialize();
+
+//         n.name = task.name;
+//         n.event_name = p.event_name || "";
+//         n.subject = p.subject || "";
+//         n.message_text = p.message || "";
+//         n.active = true;
+
+//         if (task.table) {
+//             n.collection = task.table;
+//         }
+
+//         return n.insert();
+//     }
+
+
+//     // Create an ACL (Access Control rule)
+//     function createACL(task) {
+//         var p = task.properties || {};
+
+//         var acl = new GlideRecord("sys_security_acl");
+//         acl.initialize();
+
+//         acl.name = task.table + (task.name ? "." + task.name : "");
+//         acl.type = "record";
+//         acl.operation = p.operation || "read";
+//         acl.admin_overrides = (p.admin_overrides !== false);
+//         acl.script = p.script || "";
+//         acl.condition = p.condition || "";
+//         acl.active = true;
+
+//         return acl.insert();
+//     }
+
+
+//     // Create a new custom table
+//     // (works for simple flat tables; for anything more complex,
+//     // build the table in Studio / App Engine Studio instead)
+//     function createTable(task) {
+//         var p = task.properties || {};
+
+//         var tableName = task.table;
+//         var label = p.label || task.name || tableName;
+//         var extendsTable = p["extends"] || "";
+
+//         var manager = new GlideDBObjectManager(tableName);
+//         if (!manager.tableExists()) {
+//             manager.createTable(label, extendsTable);
+//         }
+
+//         var gr = new GlideRecord("sys_db_object");
+//         gr.addQuery("name", tableName);
+//         gr.query();
+//         if (gr.next()) {
+//             return gr.getUniqueValue();
+//         }
+//         return null;
+//     }
+
+
+//     // Add a new field (column) to an existing table
+//     function createField(task) {
+//         var p = task.properties || {};
+
+//         var el = new GlideRecord("sys_dictionary");
+//         el.initialize();
+
+//         el.name = task.table;
+//         el.element = p.field_name;
+//         el.column_label = p.field_label || p.field_name;
+//         el.internal_type = p.field_type || "string";
+//         el.max_length = p.max_length || 40;
+//         el.active = true;
+
+//         return el.insert();
+//     }
+
+// })(request, response);
+
+
+(function process(/*RESTAPIRequest*/ request, /*RESTAPIResponse*/ response) {
+
+
+    var body = request.body.data;
+
+    gs.log("AI Studio received: " + JSON.stringify(body));
+
+ 
+    if (!body || !body.tasks) {
+        response.setStatus(400);
+        response.setBody({
+            status: "error",
+            message: "Request must include a 'tasks' array"
+        });
+        return;
+    }
+
+    var results = [];
+
+
+    for (var i = 0; i < body.tasks.length; i++) {
+
+        var task = body.tasks[i];
+        var newSysId = null;
+
+        if (task.type === "record") {
+            newSysId = createRecord(task);
+
+        } else if (task.type === "business_rule") {
+            newSysId = createBusinessRule(task);
+
+        } else if (task.type === "client_script") {
+            newSysId = createClientScript(task);
+
+        } else if (task.type === "ui_policy") {
+            newSysId = createUIPolicy(task);
+
+        } else if (task.type === "script_include") {
+            newSysId = createScriptInclude(task);
+
+        } else if (task.type === "ui_action") {
+            newSysId = createUIAction(task);
+
+        } else if (task.type === "catalog_item") {
+            newSysId = createCatalogItem(task);
+
+        } else if (task.type === "notification") {
+            newSysId = createNotification(task);
+
+        } else if (task.type === "acl") {
+            newSysId = createACL(task);
+
+        } else if (task.type === "table") {
+            newSysId = createTable(task);
+
+        } else if (task.type === "field") {
+            newSysId = createField(task);
+
+        } else {
+            
+            results.push({
+                status: "error",
+                type: task.type,
+                message: "Unsupported type: " + task.type
+            });
+            continue; 
+        }
+
+        results.push({
+            status: "success",
+            type: task.type,
+            name: task.name || "",
+            sys_id: newSysId
+        });
+    }
+
+ 
+    response.setStatus(200);
+    response.setBody({
+        status: "done",
+        results: results
+    });
+
+
+    
+    function createRecord(task) {
+
+        var p = task.properties || {};
+
+       
+        var blockedTables = [
+            "sys_user",
+            "sys_user_role",
+            "sys_user_has_role",
+            "sys_security_acl",
+            "sys_script",
+            "sys_script_client",
+            "sys_script_include",
+            "sys_dictionary",
+            "sys_db_object",
+            "sys_properties"
+        ];
+
+        if (blockedTables.indexOf(task.table) !== -1) {
+            gs.error("Blocked: table '" + task.table + "' is a protected system table and cannot be written to through this endpoint");
+            return null;
+        }
+
+        var fields = task.fields || (p.fields) || {};
+        var gr = new GlideRecord(task.table);
+
+      
+        var foundExisting = false;
+        if (p.update_if_exists && p.lookup_field && fields[p.lookup_field] !== undefined) {
+            gr.addQuery(p.lookup_field, fields[p.lookup_field]);
+            gr.query();
+            if (gr.next()) {
+                foundExisting = true;
+            }
+        }
+
+        if (!foundExisting) {
+            gr.initialize();
+        }
+
+        for (var fieldName in fields) {
+            gr.setValue(fieldName, fields[fieldName]);
+        }
+
+        return foundExisting ? (gr.update() && gr.getUniqueValue()) : gr.insert();
+    }
+
+
+    // Create a Business Rule
+    function createBusinessRule(task) {
+        var p = task.properties || {};
+
+        var br = new GlideRecord("sys_script");
+        br.initialize();
+
+        br.name = task.name;
+        br.collection = task.table;
+        br.when = p.when;
+        br.order = p.order || 100;
+
+        br.action_insert = !!p.insert;
+        br.action_update = !!p.update;
+        br.action_delete = !!p["delete"];
+        br.action_query = !!p.query;
+
+        br.active = (p.active !== false);
+        br.advanced = !!p.advanced;
+        br.abort_action = !!p.abort_action;
+
+        br.condition = p.condition || "";
+        br.script = p.script || "";
+        br.description = p.description || "";
+
+        return br.insert();
+    }
+
+
+    // Create a Client Script
+    function createClientScript(task) {
+        var p = task.properties || {};
+
+        var cs = new GlideRecord("sys_script_client");
+        cs.initialize();
+
+        cs.name = task.name;
+        cs.table = task.table;
+        cs.type = p.client_type;
+        cs.field = p.field || "";
+        cs.script = p.script || "";
+
+        cs.active = (p.active !== false);
+        cs.ui_type = mapUiType(p.ui_type); // "desktop"/"mobile"/"all" -> ServiceNow's numeric codes
+        cs.description = p.description || "";
+        cs.isolate_script = !!p.isolate_script;
+
+        return cs.insert();
+    }
+
+  
+    function mapUiType(uiType) {
+        if (uiType === "mobile") return "1";
+        if (uiType === "desktop") return "0";
+        return "10"; // "all" / not specified
+    }
+
+
+    // Create a UI Policy, plus one UI Policy Action per affected field
+    function createUIPolicy(task) {
+        var p = task.properties || {};
+
+        var up = new GlideRecord("sys_ui_policy");
+        up.initialize();
+
+        up.short_description = task.name;
+        up.table = task.table;
+        up.conditions = p.condition || "";
+
+        up.active = (p.active !== false);
+        up.on_load = !!p.on_load;
+        up.reverse_if_false = !!p.reverse_if_false;
+        up.description = p.description || "";
+
+        var uiPolicySysId = up.insert();
+
+        addPolicyActionsForFields(uiPolicySysId, p.mandatory_fields, "mandatory");
+        addPolicyActionsForFields(uiPolicySysId, p.read_only_fields, "read_only");
+        addPolicyActionsForFields(uiPolicySysId, p.visible_fields, "visible");
+
+        return uiPolicySysId;
+    }
+
+    // Helper used only by createUIPolicy above
+    function addPolicyActionsForFields(uiPolicySysId, fieldList, kind) {
+        if (!fieldList) return;
+
+        for (var i = 0; i < fieldList.length; i++) {
+            var action = new GlideRecord("sys_ui_policy_action");
+            action.initialize();
+            action.ui_policy = uiPolicySysId;
+            action.field = fieldList[i];
+
+            if (kind === "mandatory") action.mandatory = "true";
+            if (kind === "read_only") action.disabled = "true";
+            if (kind === "visible") action.visible = "true";
+
+            action.insert();
+        }
+    }
+
+
+    // Create a Script Include
+    function createScriptInclude(task) {
+        var p = task.properties || {};
+
+        var si = new GlideRecord("sys_script_include");
+        si.initialize();
+
+        si.name = task.name;
+        si.api_name = p.api_name || task.name;
+        si.script = p.script || "";
+        si.client_callable = !!p.client_callable;
+
+        si.active = (p.active !== false);
+        si.description = p.description || "";
+       
+        si.access = (p.accessible_from === "All application scopes") ? "public" : "package_private";
+
+        return si.insert();
+    }
+
+
+    // Create a UI Action (a button on a form or list)
+    function createUIAction(task) {
+        var p = task.properties || {};
+
+        var ua = new GlideRecord("sys_ui_action");
+        ua.initialize();
+
+        ua.name = p.action_name || task.name;
+        ua.table = task.table || "";
+        ua.script = p.script || "";
+        ua.condition = p.condition || "";
+
+        ua.active = (p.active !== false);
+        ua.order = p.order || 100;
+
+        ua.form_button = !!p.form_button;
+        ua.form_context_menu = !!p.form_context_menu;
+        ua.form_link = !!p.form_link;
+        ua.list_banner_button = !!p.list_banner_button;
+        ua.list_choice = !!p.list_choice;
+        ua.list_context_menu = !!p.list_context_menu;
+        ua.client = !!p.client;
+
+        ua.show_insert = (p.show_insert !== false);
+        ua.show_update = (p.show_update !== false);
+        ua.show_multiple_update = !!p.show_multiple_update;
+
+        ua.comments = p.confirmation || ""; // confirmation dialog text
+        ua.description = p.description || "";
+
+        return ua.insert();
+    }
+
+
+    // Create a basic Catalog Item
+    // (does not add variables or attach a workflow/flow — those are
+    // separate records you can add later once this part is comfortable)
+    function createCatalogItem(task) {
+        var p = task.properties || {};
+
+        var ci = new GlideRecord("sc_cat_item");
+        ci.initialize();
+
+        ci.name = task.name;
+        ci.short_description = p.short_description || task.name;
+        ci.description = p.description || "";
+        ci.price = p.price || "0";
+        ci.active = (p.active !== false);
+        ci.delivery_time = p.delivery_time || "";
+        ci.icon = p.icon || "";
+        ci.picture = p.picture || "";
+        ci.no_quantity = !p.quantity; // note: field is "no_quantity", so we invert
+        ci.available_for = p.available_for || "";
+        ci.not_available_for = p.not_available_for || "";
+
+        if (p.category) {
+            var cat = new GlideRecord("sc_category");
+            cat.addQuery("title", p.category);
+            cat.query();
+            if (cat.next()) {
+                ci.category = cat.getUniqueValue();
+            }
+        }
+
+        return ci.insert();
+    }
+
+
+    // Create an Email Notification
+    function createNotification(task) {
+        var p = task.properties || {};
+
+        var n = new GlideRecord("sysevent_email_action");
+        n.initialize();
+
+        n.name = task.name;
+        n.event_name = p.event_name || "";
+        n.subject = p.subject || "";
+        n.message_text = p.message || "";
+        n.recipient_field = p.recipient_field || "";
+
+        n.active = (p.active !== false);
+        n.send_self = !!p.send_self;
+        n.condition = p.condition || "";
+        n.description = p.description || "";
+        n.content_type = (p.content_type === "text/html") ? "html" : "text";
+
+        if (task.table) {
+            n.collection = task.table;
+        }
+
+        return n.insert();
+    }
+
+
+    // Create an ACL (Access Control rule)
+    function createACL(task) {
+        var p = task.properties || {};
+
+        var acl = new GlideRecord("sys_security_acl");
+        acl.initialize();
+
+        acl.name = task.table + (task.name ? "." + task.name : "");
+        acl.type = "record";
+        acl.operation = p.operation || "read";
+        acl.admin_overrides = (p.admin_overrides !== false);
+        acl.script = p.script || "";
+        acl.condition = p.condition || "";
+
+        acl.active = (p.active !== false);
+        acl.description = p.description || "";
+        // requires_role expects a sys_id, so we look up the role by name
+        if (p.requires_role) {
+            var role = new GlideRecord("sys_user_role");
+            role.addQuery("name", p.requires_role);
+            role.query();
+            if (role.next()) {
+                var reqRole = new GlideRecord("sys_security_acl_role");
+                // role requirement is added after the ACL is inserted (see below)
+                acl._pendingRole = role.getUniqueValue();
+            }
+        }
+
+        var aclSysId = acl.insert();
+
+        if (acl._pendingRole) {
+            var link = new GlideRecord("sys_security_acl_role");
+            link.initialize();
+            link.sys_security_acl = aclSysId;
+            link.sys_user_role = acl._pendingRole;
+            link.insert();
+        }
+
+        return aclSysId;
+    }
+
+
+  
+    function createTable(task) {
+        var p = task.properties || {};
+
+        var tableName = task.table;
+        var label = p.label || task.name || tableName;
+        var extendsTable = p["extends"] || "";
+
+        var manager = new GlideDBObjectManager(tableName);
+        if (!manager.tableExists()) {
+            manager.createTable(label, extendsTable);
+        }
+
+        var gr = new GlideRecord("sys_db_object");
+        gr.addQuery("name", tableName);
+        gr.query();
+        if (gr.next()) {
+            return gr.getUniqueValue();
+        }
+        return null;
+    }
+
+
+    // Add a new field (column) to an existing table
+    function createField(task) {
+        var p = task.properties || {};
+
+        var el = new GlideRecord("sys_dictionary");
+        el.initialize();
+
+        el.name = task.table;
+        el.element = p.field_name;
+        el.column_label = p.field_label || p.field_name;
+        el.internal_type = p.field_type || "string";
+        el.max_length = p.max_length || 40;
+
+        el.active = (p.active !== false);
+        el.mandatory = !!p.mandatory;
+        el.default_value = p.default_value || "";
+        el.display = !!p.display;
+        el.unique = !!p.unique;
+        el.read_only = !!p.read_only;
+        el.comments = p.description || "";
+
+        // Reference fields need to know which table they point to
+        if (p.field_type === "reference" && p.reference_table) {
+            el.reference = p.reference_table;
+        }
+
+        var fieldSysId = el.insert();
+
+        // Choice fields need one sys_choice row per allowed value
+        if (p.field_type === "choice" && p.choice_values && p.choice_values.length) {
+            for (var i = 0; i < p.choice_values.length; i++) {
+                var choice = new GlideRecord("sys_choice");
+                choice.initialize();
+                choice.name = task.table;
+                choice.element = p.field_name;
+                choice.value = p.choice_values[i];
+                choice.label = p.choice_values[i];
+                choice.insert();
+            }
+        }
+
+        return fieldSysId;
+    }
+
+})(request, response);
